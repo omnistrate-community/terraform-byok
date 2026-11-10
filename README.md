@@ -37,7 +37,7 @@ Terraform does not use long-lived credentials. The provisioner runs the module u
 | --- | --- |
 | `specs/k3s-cell-aws-public-ecr.yaml` | Plan for a service provider whose agent chart and image come from the public Omnistrate registry. |
 | `specs/k3s-cell-aws-private-ecr.yaml` | Plan for a service provider whose agent chart and image come from its private ECR registry, as with the signed BYOC on-prem installer. |
-| `terraform/aws-ec2-k3s-cell` | Terraform module that creates the VM, the security group, k3s, and the agent. Both plans use it. |
+| `terraform/aws-ec2-k3s-cell` | Terraform module that creates the VM, the security group, k3s, and the agent. `cloud-init.tf` holds the VM's cloud-init document. Both plans use it. |
 | `customer-setup/aws/cell-terraform-role.yaml` | CloudFormation template that the customer deploys. It creates the IAM role that the module assumes. |
 
 ## Choose a plan
@@ -115,6 +115,8 @@ To provision different infrastructure, replace the module and keep its contract 
 | `agent_registry_*` | `$sys.deploymentCell.customerDeploymentCell.agent.registry.*`, private registry plan only |
 
 The module must create a Kubernetes cluster with outbound access to the Omnistrate control plane and install the agent chart with the decoded Helm values. The values contain the agent's client key, so treat them as a secret. The cell moves to `RUNNING` when the agent connects. Resources that depend on `cellInfra` wait for that, then deploy onto the new cluster.
+
+Omnistrate loads only Terraform files (`.tf`, `.tf.json`, and variable files) from a module in Git. Keep templates and scripts inside `.tf` files, as `cloud-init.tf` does with a heredoc, because `templatefile()` cannot read a file that was not loaded.
 
 The module runs once per deployment. Later changes to the agent values must not replace the cluster, so the EC2 module ignores changes to its user data. Agent upgrades go through the control plane after the agent connects.
 

@@ -1,29 +1,34 @@
-#cloud-config
-# Installs a single-node k3s cluster and the Omnistrate dataplane agent.
-# Terraform renders this file with templatefile(). Shell variables are written
-# as $${name} so that templatefile() leaves them for bash.
+# The cloud-init document of the k3s VM. It installs a single-node k3s cluster
+# and the Omnistrate dataplane agent.
+#
+# Omnistrate loads only Terraform files from a module in Git, so the document
+# is a heredoc here instead of a separate template file. Shell variables are
+# written as $${name} so that Terraform leaves them for bash.
 #
 # The k3s flags match `install.sh --create-k3s-cluster NAME
 # --k3s-node-external-ip IP` from the BYOC on-prem install kit. The kernel
 # modules and sysctls are the ones that k3s needs on Ubuntu 24.04.
-ssh_authorized_keys: ${jsonencode(ssh_authorized_keys)}
+locals {
+  cloud_init = <<EOT
+#cloud-config
+ssh_authorized_keys: ${jsonencode(local.ssh_authorized_keys)}
 write_files:
   - path: /etc/omnistrate/dp-agent-values.yaml
     owner: root:root
     permissions: "0600"
     encoding: b64
-    content: ${agent_helm_values_base64}
-%{ if agent_registry_host != "" ~}
+    content: ${var.agent_helm_values_base64}
+%{if var.agent_registry_host != ""~}
   - path: /etc/omnistrate/dp-agent-registry-password
     owner: root:root
     permissions: "0600"
-    content: ${jsonencode(agent_registry_password)}
+    content: ${jsonencode(var.agent_registry_password)}
   - path: /etc/omnistrate/dp-agent-registry-config.json
     owner: root:root
     permissions: "0600"
     encoding: b64
-    content: ${agent_registry_docker_config_json_base64}
-%{ endif ~}
+    content: ${var.agent_registry_docker_config_json_base64}
+%{endif~}
   - path: /etc/modules-load.d/omnistrate-k3s.conf
     owner: root:root
     permissions: "0644"
@@ -70,7 +75,7 @@ write_files:
         install_exec="$${install_exec} --node-external-ip=$${public_ip} --tls-san=$${public_ip}"
       fi
       curl -fsSL --proto '=https' https://get.k3s.io \
-        | INSTALL_K3S_VERSION="${k3s_version}" INSTALL_K3S_EXEC="$${install_exec}" sh -
+        | INSTALL_K3S_VERSION="${var.k3s_version}" INSTALL_K3S_EXEC="$${install_exec}" sh -
 
       export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
       for _ in $(seq 1 60); do
@@ -99,11 +104,11 @@ write_files:
         aarch64) arch=arm64 ;;
         *) echo "unsupported architecture $(uname -m)" >&2; exit 1 ;;
       esac
-      curl -fsSL --proto '=https' "https://get.helm.sh/helm-${helm_version}-linux-$${arch}.tar.gz" \
+      curl -fsSL --proto '=https' "https://get.helm.sh/helm-${var.helm_version}-linux-$${arch}.tar.gz" \
         | tar -xz -C /tmp "linux-$${arch}/helm"
       install -m 0755 "/tmp/linux-$${arch}/helm" /usr/local/bin/helm
 
-%{ if agent_registry_host != "" ~}
+%{if var.agent_registry_host != ""~}
       # The agent chart and image come from the service provider's private
       # registry. Helm logs in with a temporary registry configuration, and the
       # agent pulls its image with the pull secret. The credential files are
@@ -111,23 +116,25 @@ write_files:
       registry_workspace="$(mktemp -d)"
       trap 'rm -rf "$${registry_workspace}" /etc/omnistrate/dp-agent-registry-password /etc/omnistrate/dp-agent-registry-config.json' EXIT
       export HELM_REGISTRY_CONFIG="$${registry_workspace}/config.json"
-      helm registry login "${agent_registry_host}" --username "${agent_registry_username}" \
+      helm registry login "${var.agent_registry_host}" --username "${var.agent_registry_username}" \
         --password-stdin </etc/omnistrate/dp-agent-registry-password
-      kubectl create namespace "${agent_namespace}" --dry-run=client -o yaml | kubectl apply -f -
-      kubectl -n "${agent_namespace}" create secret generic "${agent_registry_pull_secret_name}" \
+      kubectl create namespace "${var.agent_namespace}" --dry-run=client -o yaml | kubectl apply -f -
+      kubectl -n "${var.agent_namespace}" create secret generic "${var.agent_registry_pull_secret_name}" \
         --type=kubernetes.io/dockerconfigjson \
         --from-file=.dockerconfigjson=/etc/omnistrate/dp-agent-registry-config.json \
         --dry-run=client -o yaml | kubectl apply -f -
-%{ endif ~}
-      helm upgrade --install "${agent_release_name}" "${agent_chart_repository}" \
-        --version "${agent_chart_version}" \
-        --namespace "${agent_namespace}" --create-namespace \
+%{endif~}
+      helm upgrade --install "${var.agent_release_name}" "${var.agent_chart_repository}" \
+        --version "${var.agent_chart_version}" \
+        --namespace "${var.agent_namespace}" --create-namespace \
         --values /etc/omnistrate/dp-agent-values.yaml \
         --set nameOverride=dp-agent \
         --timeout 10m0s \
         --wait
-      kubectl -n "${agent_namespace}" wait --for=condition=Ready pod \
-        --selector=app.kubernetes.io/instance="${agent_release_name}" \
+      kubectl -n "${var.agent_namespace}" wait --for=condition=Ready pod \
+        --selector=app.kubernetes.io/instance="${var.agent_release_name}" \
         --timeout=10m
 runcmd:
   - [/usr/local/bin/omnistrate-cell-bootstrap.sh]
+EOT
+}

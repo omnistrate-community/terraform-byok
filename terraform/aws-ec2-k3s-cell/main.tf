@@ -112,21 +112,7 @@ resource "aws_instance" "k3s" {
   vpc_security_group_ids      = [aws_security_group.cell.id]
   associate_public_ip_address = var.associate_public_ip
 
-  user_data_base64 = base64gzip(templatefile("${path.module}/templates/cloud-init.yaml.tftpl", {
-    ssh_authorized_keys                      = local.ssh_authorized_keys
-    k3s_version                              = var.k3s_version
-    helm_version                             = var.helm_version
-    agent_chart_repository                   = var.agent_chart_repository
-    agent_chart_version                      = var.agent_chart_version
-    agent_namespace                          = var.agent_namespace
-    agent_release_name                       = var.agent_release_name
-    agent_helm_values_base64                 = var.agent_helm_values_base64
-    agent_registry_host                      = var.agent_registry_host
-    agent_registry_username                  = var.agent_registry_username
-    agent_registry_password                  = var.agent_registry_password
-    agent_registry_docker_config_json_base64 = var.agent_registry_docker_config_json_base64
-    agent_registry_pull_secret_name          = var.agent_registry_pull_secret_name
-  }))
+  user_data_base64 = base64gzip(local.cloud_init)
 
   metadata_options {
     http_tokens = "required"
