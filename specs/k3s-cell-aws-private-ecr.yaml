@@ -1,0 +1,260 @@
+# yaml-language-server: $schema=https://api.omnistrate.cloud/2022-09-01-00/schema/service-spec-schema.json
+#
+# BYOC on-prem plan whose cell is a single-node k3s cluster on an EC2 VM in the
+# customer's AWS account. The cellInfra resource runs Terraform on the
+# Omnistrate provisioner host cluster (deploymentTarget ControlPlane). It
+# creates the VM, installs k3s, and installs the dataplane agent. The
+# postgresChart resource is a Helm chart that runs on the cell after the agent
+# connects.
+#
+# Build the plan from the repository root, because artifactsLocalPath is
+# relative to the directory where omctl runs.
+#
+# This plan is for a service provider whose dataplane agent chart and image
+# come from its private ECR registry, as with the signed BYOC on-prem
+# installer. cellInfra passes the registry credentials from
+# $sys.deploymentCell.customerDeploymentCell.agent.registry to the module.
+# Cloud-init logs Helm in to the registry and creates the image pull secret
+# before it installs the agent. The registry keys do not resolve for a service
+# provider on the public registry, which uses k3s-cell-aws-public-ecr.yaml.
+name: K3s Cell on AWS EC2 with Private Agent Registry
+deployment:
+  byoaDeployment:
+    # The AWS account and bootstrap role of the Omnistrate control plane that
+    # runs the cellInfra Terraform. Replace the placeholder with the account ID
+    # that Omnistrate gives you for your control plane.
+    AwsAccountId: '<CONTROL_PLANE_AWS_ACCOUNT_ID>'
+    AwsBootstrapRoleAccountArn: 'arn:aws:iam::<CONTROL_PLANE_AWS_ACCOUNT_ID>:role/omnistrate-bootstrap-role'
+features:
+  INTERNAL:
+    certificateAuthority:
+      type: none
+services:
+  - name: postgresChart
+    dependsOn:
+      - cellInfra
+    compute:
+      instanceTypes:
+        - name: t4g.small
+          cloudProvider: aws
+        - name: byoc-onprem-node
+          cloudProvider: byoc-onprem
+    network:
+      ports:
+        - 5432
+    helmChartConfiguration:
+      chartName: postgresql
+      chartVersion: 16.7.27
+      chartRepoName: bitnamicharts
+      chartRepoURL: oci://ghcr.io/omnistrate/charts
+      runtimeConfiguration:
+        waitForJobs: false
+        recreate: true
+      chartValues:
+        global:
+          security:
+            allowInsecureImages: true
+          postgresql:
+            auth:
+              postgresPassword: "$var.pgPassword"
+              database: "$var.pgDatabase"
+        image:
+          registry: ghcr.io
+          repository: omnistrate/bitnamisecure-postgresql
+          tag: latest
+        primary:
+          persistence:
+            enabled: true
+            size: 1Gi
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+        readReplicas:
+          replicaCount: 0
+    apiParameters:
+      - key: pgPassword
+        name: PG Password
+        description: PostgreSQL admin password
+        type: String
+        modifiable: false
+        required: true
+        export: false
+      - key: pgDatabase
+        name: Database Name
+        description: Default database name
+        type: String
+        modifiable: false
+        required: true
+        export: true
+        defaultValue: appdb
+      - key: customerRoleArn
+        name: Customer role ARN
+        description: ARN of the role from the cell CloudFormation stack that Terraform assumes
+        type: String
+        modifiable: false
+        required: true
+        export: false
+        parameterDependencyMap:
+          cellInfra: customerRoleArn
+      - key: awsRegion
+        name: AWS region
+        description: Region of the k3s VM
+        type: String
+        modifiable: false
+        required: true
+        export: false
+        parameterDependencyMap:
+          cellInfra: awsRegion
+      - key: subnetId
+        name: Subnet ID
+        description: Subnet for the k3s VM. An empty value selects a default subnet of the default VPC.
+        type: String
+        modifiable: false
+        required: false
+        export: false
+        defaultValue: ''
+        parameterDependencyMap:
+          cellInfra: subnetId
+      - key: instanceType
+        name: Instance type
+        description: EC2 instance type for the k3s node
+        type: String
+        modifiable: false
+        required: false
+        export: false
+        defaultValue: t3.2xlarge
+        parameterDependencyMap:
+          cellInfra: instanceType
+      - key: rootVolumeSizeGiB
+        name: Root volume size
+        description: Root volume size of the k3s node in GiB
+        type: String
+        modifiable: false
+        required: false
+        export: false
+        defaultValue: '80'
+        parameterDependencyMap:
+          cellInfra: rootVolumeSizeGiB
+      - key: sshAuthorizedKeys
+        name: SSH authorized keys
+        description: Comma-separated SSH public keys for the ubuntu user on the VM
+        type: String
+        modifiable: false
+        required: false
+        export: false
+        defaultValue: ''
+        parameterDependencyMap:
+          cellInfra: sshAuthorizedKeys
+      - key: ingressCidrs
+        name: Ingress CIDRs
+        description: Comma-separated CIDRs that may reach SSH, HTTP, HTTPS, and node ports on the VM
+        type: String
+        modifiable: false
+        required: false
+        export: false
+        defaultValue: ''
+        parameterDependencyMap:
+          cellInfra: ingressCidrs
+
+  # cellInfra runs Terraform on the provisioner host cluster while the cell is
+  # PENDING. For a ControlPlane resource $sys.deploymentCell is the
+  # provisioner, and the customer cell is under
+  # $sys.deploymentCell.customerDeploymentCell. Terraform assumes the customer
+  # role in terraformExecutionIdentity through web identity federation.
+  - name: cellInfra
+    internal: true
+    deploymentTarget:
+      account: ControlPlane
+    apiParameters:
+      - key: customerRoleArn
+        name: Customer role ARN
+        description: ARN of the role from the cell CloudFormation stack that Terraform assumes
+        type: String
+        modifiable: false
+        required: true
+        export: false
+      - key: awsRegion
+        name: AWS region
+        description: Region of the k3s VM
+        type: String
+        modifiable: false
+        required: true
+        export: false
+      - key: subnetId
+        name: Subnet ID
+        description: Subnet for the k3s VM. An empty value selects a default subnet of the default VPC.
+        type: String
+        modifiable: false
+        required: false
+        export: false
+        defaultValue: ''
+      - key: instanceType
+        name: Instance type
+        description: EC2 instance type for the k3s node
+        type: String
+        modifiable: false
+        required: false
+        export: false
+        defaultValue: t3.2xlarge
+      - key: rootVolumeSizeGiB
+        name: Root volume size
+        description: Root volume size of the k3s node in GiB
+        type: String
+        modifiable: false
+        required: false
+        export: false
+        defaultValue: '80'
+      - key: sshAuthorizedKeys
+        name: SSH authorized keys
+        description: Comma-separated SSH public keys for the ubuntu user on the VM
+        type: String
+        modifiable: false
+        required: false
+        export: false
+        defaultValue: ''
+      - key: ingressCidrs
+        name: Ingress CIDRs
+        description: Comma-separated CIDRs that may reach SSH, HTTP, HTTPS, and node ports on the VM
+        type: String
+        modifiable: false
+        required: false
+        export: false
+        defaultValue: ''
+    terraformConfigurations:
+      configurationPerCloudProvider:
+        # The key names the cloud that runs Terraform. ControlPlane resources
+        # always run on the AWS provisioner host cluster.
+        aws:
+          terraformPath: /
+          artifactsLocalPath: terraform/aws-ec2-k3s-cell
+          terraformExecutionIdentity: "{{ $var.customerRoleArn }}"
+          variablesValuesFileOverride: |
+            deployment_id            = "{{ $sys.id }}"
+            cell_name                = "{{ $sys.deploymentCell.customerDeploymentCell.clusterName }}"
+            region                   = "{{ $var.awsRegion }}"
+            subnet_id                = "{{ $var.subnetId }}"
+            instance_type            = "{{ $var.instanceType }}"
+            root_volume_size_gb      = "{{ $var.rootVolumeSizeGiB }}"
+            ssh_authorized_keys      = "{{ $var.sshAuthorizedKeys }}"
+            ingress_cidrs            = "{{ $var.ingressCidrs }}"
+            agent_chart_repository   = "{{ $sys.deploymentCell.customerDeploymentCell.agent.chart.repository }}"
+            agent_chart_version      = "{{ $sys.deploymentCell.customerDeploymentCell.agent.chart.version }}"
+            agent_namespace          = "{{ $sys.deploymentCell.customerDeploymentCell.agent.namespace }}"
+            agent_release_name       = "{{ $sys.deploymentCell.customerDeploymentCell.agent.releaseName }}"
+            agent_helm_values_base64 = "{{ $sys.deploymentCell.customerDeploymentCell.agent.helmValuesBase64 }}"
+            agent_registry_host                      = "{{ $sys.deploymentCell.customerDeploymentCell.agent.registry.host }}"
+            agent_registry_username                  = "{{ $sys.deploymentCell.customerDeploymentCell.agent.registry.username }}"
+            agent_registry_password                  = "{{ $sys.deploymentCell.customerDeploymentCell.agent.registry.password }}"
+            agent_registry_docker_config_json_base64 = "{{ $sys.deploymentCell.customerDeploymentCell.agent.registry.dockerConfigJSONBase64 }}"
+            agent_registry_pull_secret_name          = "{{ $sys.deploymentCell.customerDeploymentCell.agent.registry.pullSecretName }}"
+          requiredOutputs:
+            - key: vm_id
+              exported: true
+            - key: vm_public_ip
+              exported: true
+            - key: vm_private_ip
+              exported: true

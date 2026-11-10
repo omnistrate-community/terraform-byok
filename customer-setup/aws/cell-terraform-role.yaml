@@ -1,0 +1,139 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Role that lets the Omnistrate provisioner run the k3s cell Terraform in this
+  account. The provisioner agent runs Terraform under a Kubernetes service
+  account for the BYOC on-prem account instance and calls
+  sts:AssumeRoleWithWebIdentity with that service account's token. The role
+  trusts only that subject and audience. The role can also manage the inbound
+  security group rules that the module creates when ingress_cidrs is set.
+
+Parameters:
+  OIDCIssuerURL:
+    Type: String
+    Description: >-
+      OIDC issuer of the Omnistrate provisioner cluster, from the
+      terraform_identity_oidc_issuer_url output of the BYOC on-prem account.
+    AllowedPattern: "^https://[^/]+(/.*)?$"
+  Subject:
+    Type: String
+    Description: >-
+      Service account that runs Terraform for the BYOC on-prem account
+      instance, from the terraform_identity_subject output.
+    AllowedPattern: "^system:serviceaccount:[a-z0-9-]+:[a-z0-9-]+$"
+  Audience:
+    Type: String
+    Default: https://kubernetes.default.svc
+    Description: >-
+      Audience of the service account token, from the
+      terraform_identity_audience output. It is the client ID of the OIDC
+      provider.
+  ExistingOIDCProviderArn:
+    Type: String
+    Default: ""
+    Description: >-
+      ARN of an IAM OIDC provider that already exists for OIDCIssuerURL. An
+      account can hold only one provider per issuer, so pass the existing ARN
+      when another stack or a previous setup created it. Leave it empty to
+      create the provider in this stack. The stack keeps a provider that it
+      created when the stack is deleted, because other roles may trust it.
+      The existing provider must list the Audience value as a client ID. Add
+      it with aws iam add-client-id-to-open-id-connect-provider when the
+      provider lists only sts.amazonaws.com.
+    AllowedPattern: "^$|^arn:aws:iam::[0-9]{12}:oidc-provider/.+$"
+  RoleName:
+    Type: String
+    Default: omnistrate-k3s-cell-terraform
+    Description: Name of the role to create.
+
+Conditions:
+  CreateOIDCProvider: !Equals [!Ref ExistingOIDCProviderArn, ""]
+
+Resources:
+  OIDCProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CreateOIDCProvider
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Url: !Ref OIDCIssuerURL
+      ClientIdList:
+        - !Ref Audience
+
+  CellTerraformRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref RoleName
+      MaxSessionDuration: 3600
+      # IAM condition keys name the issuer without its scheme, and a template
+      # cannot compute a map key, so the trust policy is a substituted string.
+      AssumeRolePolicyDocument: !Sub
+        - |
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Principal": {"Federated": "${ProviderArn}"},
+                "Action": "sts:AssumeRoleWithWebIdentity",
+                "Condition": {
+                  "StringEquals": {
+                    "${IssuerHost}:sub": "${Subject}",
+                    "${IssuerHost}:aud": "${Audience}"
+                  }
+                }
+              }
+            ]
+          }
+        - ProviderArn: !If [CreateOIDCProvider, !GetAtt OIDCProvider.Arn, !Ref ExistingOIDCProviderArn]
+          IssuerHost: !Select [1, !Split ["https://", !Ref OIDCIssuerURL]]
+      Policies:
+        - PolicyName: k3s-cell-ec2
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: Read
+                Effect: Allow
+                Action:
+                  - ec2:Describe*
+                Resource: "*"
+              - Sid: CreateCellResources
+                Effect: Allow
+                Action:
+                  - ec2:RunInstances
+                  - ec2:CreateSecurityGroup
+                  - ec2:AuthorizeSecurityGroupEgress
+                  - ec2:RevokeSecurityGroupEgress
+                  - ec2:AuthorizeSecurityGroupIngress
+                  - ec2:RevokeSecurityGroupIngress
+                Resource: "*"
+              - Sid: TagOnCreate
+                Effect: Allow
+                Action: ec2:CreateTags
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    ec2:CreateAction:
+                      - RunInstances
+                      - CreateSecurityGroup
+              - Sid: ManageOwnCellResources
+                Effect: Allow
+                Action:
+                  - ec2:TerminateInstances
+                  - ec2:StopInstances
+                  - ec2:StartInstances
+                  - ec2:ModifyInstanceAttribute
+                  - ec2:DeleteSecurityGroup
+                  - ec2:CreateTags
+                  - ec2:DeleteTags
+                Resource: "*"
+                Condition:
+                  StringLike:
+                    ec2:ResourceTag/omnistrate-deployment: "instance-*"
+
+Outputs:
+  CellTerraformRoleArn:
+    Description: Enter this value as the Customer role ARN when you create the deployment.
+    Value: !GetAtt CellTerraformRole.Arn
+  OIDCProviderArn:
+    Description: IAM OIDC provider that the role trusts.
+    Value: !If [CreateOIDCProvider, !GetAtt OIDCProvider.Arn, !Ref ExistingOIDCProviderArn]
